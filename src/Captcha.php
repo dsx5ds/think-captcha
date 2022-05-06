@@ -6,6 +6,8 @@
 // +----------------------------------------------------------------------
 // | Licensed ( http://www.apache.org/licenses/LICENSE-2.0 )
 // +----------------------------------------------------------------------
+// | forwork: 去除session，由redis接管，随用户创建唯一uuid，并在验证时一同提交
+// +----------------------------------------------------------------------
 // | Author: yunwuxin <448901948@qq.com>
 // +----------------------------------------------------------------------
 
@@ -14,7 +16,7 @@ namespace think\captcha;
 use Exception;
 use think\Config;
 use think\Response;
-use think\Session;
+use think\Cache;
 
 class Captcha
 {
@@ -27,9 +29,9 @@ class Captcha
     private $config = null;
 
     /**
-     * @var Session|null
+     * @var Cache|null
      */
-    private $session = null;
+    private $cache = null;
 
     // 验证码字符集合
     protected $codeSet = '2345678abcdefhijkmnpqrstuvwxyzABCDEFGHJKLMNPQRTUVWXY';
@@ -64,12 +66,12 @@ class Captcha
      * 架构方法 设置参数
      * @access public
      * @param Config  $config
-     * @param Session $session
+     * @param Cache	  $cache
      */
-    public function __construct(Config $config, Session $session)
+    public function __construct(Config $config, Cache $cache)
     {
         $this->config  = $config;
-        $this->session = $session;
+        $this->cache = $cache;
     }
 
     /**
@@ -125,49 +127,90 @@ class Captcha
 
         $hash = password_hash($key, PASSWORD_BCRYPT, ['cost' => 10]);
 
-        $this->session->set('captcha', [
+        $uuid = $this->gen_uuid();
+        $this->cache->set($uuid,[
             'key' => $hash,
-        ]);
-
+        ],3600);
+        
         return [
             'value' => $bag,
             'key'   => $hash,
+            'uuid'  => $uuid
         ];
     }
+    /**
+     * 创建验证码识别UUID
+     * @return string
+     */    
+    public function gen_uuid() {
+        $uuid = array(
+            'time_low'  => 0,
+            'time_mid'  => 0,
+            'time_hi'  => 0,
+            'clock_seq_hi' => 0,
+            'clock_seq_low' => 0,
+            'node'   => array()
+        );
 
+        $uuid['time_low'] = mt_rand(0, 0xffff) + (mt_rand(0, 0xffff) << 16);
+        $uuid['time_mid'] = mt_rand(0, 0xffff);
+        $uuid['time_hi'] = (4 << 12) | (mt_rand(0, 0x1000));
+        $uuid['clock_seq_hi'] = (1 << 7) | (mt_rand(0, 128));
+        $uuid['clock_seq_low'] = mt_rand(0, 255);
+
+        for ($i = 0; $i < 6; $i++) {
+            $uuid['node'][$i] = mt_rand(0, 255);
+        }
+
+        $uuid = sprintf('%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x',
+            $uuid['time_low'],
+            $uuid['time_mid'],
+            $uuid['time_hi'],
+            $uuid['clock_seq_hi'],
+            $uuid['clock_seq_low'],
+            $uuid['node'][0],
+            $uuid['node'][1],
+            $uuid['node'][2],
+            $uuid['node'][3],
+            $uuid['node'][4],
+            $uuid['node'][5]
+        );
+
+        return $uuid;
+    }
     /**
      * 验证验证码是否正确
      * @access public
      * @param string $code 用户验证码
      * @return bool 用户验证码是否正确
      */
-    public function check(string $code): bool
+    public function check(string $code,string $uuid): bool
     {
-        if (!$this->session->has('captcha')) {
+        if (!$this->cache->get($uuid)) {
             return false;
         }
 
-        $key = $this->session->get('captcha.key');
-
+        $checkCache = $this->cache->get($uuid);
+        $key = $checkCache['key'];
         $code = mb_strtolower($code, 'UTF-8');
 
         $res = password_verify($code, $key);
 
         if ($res) {
-            $this->session->delete('captcha');
+            $this->cache->rm($uuid);
         }
 
         return $res;
     }
 
     /**
-     * 输出验证码并把验证码的值保存的session中
+     * 输出验证码并把验证码的值保存的cache中
      * @access public
      * @param null|string $config
      * @param bool        $api
      * @return Response
      */
-    public function create(string $config = null, bool $api = false): Response
+    public function create(string $config = null, bool $api = false)
     {
         $this->configure($config);
 
@@ -232,8 +275,7 @@ class Captcha
         imagepng($this->im);
         $content = ob_get_clean();
         imagedestroy($this->im);
-
-        return response($content, 200, ['Content-Length' => strlen($content)])->contentType('image/png');
+		return ['captcha'=>base64_encode($content),'uuid'=>$generator['uuid']];
     }
 
     /**
